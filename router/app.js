@@ -6,6 +6,8 @@ import user from "../models/user.js";
 import book from "../models/book.js";
 import jwt from "jsonwebtoken";
 import auth from "../middleware/auth.js";
+import admin from "../middleware/admin.js";
+
 
 dotenv.config();
 const app = express();
@@ -13,21 +15,46 @@ const app = express();
 app.use(express.json());
 app.use(cors());
 
+app.get("/api/dashboard", auth, admin, (req, res) => {
+  res.json({ message: "admin 🎉" });
+});
+
 // User registration endpoint
 app.post("/api/register", async (req, res) => {
   try {
     const { name, email, password } = req.body;
 
-    const hashedPassword = await bcyrpt.hash(password, 10);
-
     const newUser = new user({
       name,
       email,
-      password: hashedPassword,
+      password,
     });
     await newUser.save();
 
     res.status(201).json({ message: "User registered successfully" });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+app.post("/api/create-admin", async (req, res) => {
+  try {
+    const { name, email, password } = req.body;
+
+    const existingAdmin = await user.findOne({ email });
+    if (existingAdmin)
+      return res.status(400).json({ message: "Admin already exists" });
+
+    const admin = new user({
+      name,
+      email,
+      password,
+      role: "admin",
+    });
+
+    await admin.save();
+    res.status(201).json({ message: "Admin created successfully" });
   } catch (err) {
     console.error(err);
     res.status(500).json({ message: "Server error" });
@@ -58,7 +85,7 @@ app.post("/api/login", async (req, res) => {
       { expiresIn: "1h" },
     );
 
-    res.json({ token });
+    res.json({ role: userOne.role, token });
   } catch (err) {
     console.error(err);
     res.status(500).json({ message: "Server error" });
@@ -68,10 +95,7 @@ app.post("/api/login", async (req, res) => {
 // Get Users
 app.get("/api/users", async (req, res) => {
   try {
-    const users = await user
-      .find()
-      .select("-password") 
-      .sort({ createdAt: -1 });
+    const users = await user.find().select("-password").sort({ createdAt: -1 });
 
     res.status(200).json({
       success: true,
@@ -84,6 +108,23 @@ app.get("/api/users", async (req, res) => {
       success: false,
       message: "Server error",
     });
+  }
+});
+
+//DELETE user
+app.delete("/api/users/:id", async (req, res) => {
+  try {
+    const userId = req.params.id;
+    const deletedUser = await user.findByIdAndDelete(userId);
+
+    if (!deletedUser) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    res.json({ message: "User deleted successfully" });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Server error" });
   }
 });
 
@@ -119,26 +160,24 @@ app.get("/api/book/:id", async (req, res) => {
   }
 });
 
-
 //Post book
 app.post("/api/book", async (req, res) => {
   try {
-    const { title, price, discription, category} = req.body;
+    const { title, price, discription, category } = req.body;
 
     const newBook = new book({
       title,
       price,
       discription,
-      category
+      category,
     });
     await newBook.save();
-    
+
     res.status(201).json({ message: "Book added successfully" });
   } catch (err) {
     console.error(err);
-    res.status(500).json({ message: "Server error"
-    });
+    res.status(500).json({ message: "Server error" });
   }
-})
+});
 
 export default app;
