@@ -65,6 +65,28 @@ app.post("/api/login", async (req, res) => {
   }
 });
 
+// Get Users
+app.get("/api/users", async (req, res) => {
+  try {
+    const users = await user
+      .find()
+      .select("-password") 
+      .sort({ createdAt: -1 });
+
+    res.status(200).json({
+      success: true,
+      count: users.length,
+      users,
+    });
+  } catch (err) {
+    console.error("Get Users Error:", err.message);
+    res.status(500).json({
+      success: false,
+      message: "Server error",
+    });
+  }
+});
+
 app.get("/api/protected", auth, (req, res) => {
   res.json({
     message: "You are authorized 🎉",
