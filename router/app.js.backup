@@ -1,14 +1,14 @@
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
-import bcrypt from "bcrypt";
+import bcyrpt from "bcrypt";
 import user from "../models/user.js";
 import book from "../models/book.js";
 import jwt from "jsonwebtoken";
 import auth from "../middleware/auth.js";
 import admin from "../middleware/admin.js";
 import multer from "multer";
-import fs from "fs";  // Added for mkdir
+
 
 dotenv.config();
 const app = express();
@@ -72,7 +72,7 @@ app.post("/api/login", async (req, res) => {
       return res.status(400).json({ message: "Invalid credentials" });
     }
 
-    const isMatch = await bcrypt.compare(password, userOne.password);
+    const isMatch = await bcyrpt.compare(password, userOne.password);
     if (!isMatch) {
       return res.status(400).json({ message: "Invalid credentials" });
     }
@@ -140,7 +140,7 @@ app.get("/api/protected", auth, (req, res) => {
 app.get("/api/books", async (req, res) => {
   try {
     const books = await book.find();
-    res.json({ books });
+    res.json(books);
   } catch (err) {
     console.error(err);
     res.status(500).json({ message: "Server error" });
@@ -153,16 +153,13 @@ app.get("/api/book/:id", async (req, res) => {
     const bookOne = await book.findById(req.params.id);
     if (!bookOne) {
       return res.status(404).json({ message: "Book not found" });
+      res.json(bookOne);
     }
-    res.json(bookOne);
   } catch (err) {
     console.error(err);
     res.status(500).json({ message: "Server error" });
   }
 });
-
-// Ensure uploads directory exists
-fs.mkdirSync("uploads", { recursive: true });
 
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
@@ -196,21 +193,9 @@ app.post("/api/books", upload.single("image"), async (req, res) => {
 
     res.status(201).json({ message: "Book added successfully", newBook });
   } catch (err) {
-    console.error("POST /api/books error:", err);  // Improved logging
+    console.error(err);
     res.status(500).json({ message: err.message });
   }
 });
 
-// DELETE book
-app.delete("/api/books/:id", async (req, res) => {
-  try {
-    await book.findByIdAndDelete(req.params.id);
-    res.json({ message: "Book deleted successfully" });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ message: "Server error" });
-  }
-});
-
 export default app;
-
