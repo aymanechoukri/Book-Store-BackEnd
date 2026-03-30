@@ -8,13 +8,13 @@ import jwt from "jsonwebtoken";
 import auth from "../middleware/auth.js";
 import admin from "../middleware/admin.js";
 import multer from "multer";
-import fs from "fs";  // Added for mkdir
 
 dotenv.config();
 const app = express();
 
 app.use(express.json());
 app.use(cors());
+app.use("/uploads", express.static("uploads"));
 
 app.get("/api/dashboard", auth, admin, (req, res) => {
   res.json({ message: "admin 🎉" });
@@ -153,16 +153,13 @@ app.get("/api/book/:id", async (req, res) => {
     const bookOne = await book.findById(req.params.id);
     if (!bookOne) {
       return res.status(404).json({ message: "Book not found" });
+      res.json(bookOne);
     }
-    res.json(bookOne);
   } catch (err) {
     console.error(err);
     res.status(500).json({ message: "Server error" });
   }
 });
-
-// Ensure uploads directory exists
-fs.mkdirSync("uploads", { recursive: true });
 
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
@@ -196,7 +193,7 @@ app.post("/api/books", upload.single("image"), async (req, res) => {
 
     res.status(201).json({ message: "Book added successfully", newBook });
   } catch (err) {
-    console.error("POST /api/books error:", err);  // Improved logging
+    console.error(err);
     res.status(500).json({ message: err.message });
   }
 });
