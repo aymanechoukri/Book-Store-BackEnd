@@ -7,34 +7,34 @@ const bookSchema = new mongoose.Schema(
       required: true,
       trim: true,
     },
-
     price: {
       type: Number,
       required: true,
       min: 0,
     },
-
     description: {
       type: String,
       default: "",
       maxlength: 1000,
     },
-
     category: {
       type: String,
       default: "General",
       trim: true,
     },
-
     image: {
       type: String,
-      required: true, // نخليوها required حيث غادي يكون upload
+      required: true,
       validate: {
         validator: function (v) {
           return v && v.length > 0;
         },
         message: "Image is required",
       },
+    },
+    pdf: {
+      type: String,
+      required: true,
     },
   },
   { timestamps: true },

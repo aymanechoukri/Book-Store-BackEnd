@@ -18,18 +18,27 @@ const auth = (req, res, next) => {
   }
 
   try {
-    const secret = process.env.JWT_SECRET || "fallback_secret_for_testing";
-    const decoded = jwt.verify(token, secret);
+    const secret = process.env.JWT_SECRET;
+    if (!secret) {
+      throw new Error("JWT_SECRET environment variable is not set. Cannot start server.");
+    }
+    const decoded = jwt.verify(token, secret, {
+      algorithms: ['HS256'] // Only allow HS256
+    });
     req.user = decoded;
     console.log("✅ Auth success:", decoded);
     console.log("Auth Header:", authHeader);
     next();
   } catch (err) {
     console.error("❌ JWT Error:", err.name, err.message);
-    res.status(401).json({ 
-      message: "Invalid token", 
-      error: err.name === "TokenExpiredError" ? "Token expired" : "Invalid token format or signature"
-    });
+    if (process.env.NODE_ENV === 'production') {
+      res.status(401).json({ message: "Invalid or expired token" });
+    } else {
+      res.status(401).json({ 
+        message: "Invalid token",
+        error: err.name
+      });
+    }
   }
 };
 
