@@ -8,50 +8,66 @@ import jwt from "jsonwebtoken";
 import auth from "../middleware/auth.js";
 import admin from "../middleware/admin.js";
 import multer from "multer";
-import Stripe from "stripe";
 import order from "../models/order.js";
 
 dotenv.config();
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 const app = express();
 
-// Webhook middleware should be before express.json()
-app.post("/api/webhook/stripe", express.raw({ type: "application/json" }), async (req, res) => {
-  const sig = req.headers["stripe-signature"];
+// PayPal Configuration
+const PAYPAL_CLIENT_ID = process.env.PAYPAL_CLIENT_ID;
+const PAYPAL_CLIENT_SECRET = process.env.PAYPAL_CLIENT_SECRET;
+const PAYPAL_MODE = process.env.PAYPAL_MODE || "sandbox";
+const PAYPAL_API_BASE = PAYPAL_MODE === "sandbox" 
+  ? "https://api-m.sandbox.paypal.com" 
+  : "https://api-m.paypal.com";
 
-  if (!sig) {
-    return res.status(400).json({ error: "Missing stripe-signature header" });
-  }
-
+// Function to get PayPal access token
+async function getPayPalAccessToken() {
   try {
-    const event = stripe.webhooks.constructEvent(
-      req.body,
-      sig,
-      process.env.STRIPE_WEBHOOK_SECRET
-    );
+    const auth = Buffer.from(`${PAYPAL_CLIENT_ID}:${PAYPAL_CLIENT_SECRET}`).toString("base64");
+    
+    const response = await fetch(`${PAYPAL_API_BASE}/v1/oauth2/token`, {
+      method: "POST",
+      headers: {
+        "Authorization": `Basic ${auth}`,
+        "Content-Type": "application/x-www-form-urlencoded"
+      },
+      body: "grant_type=client_credentials"
+    });
 
-    if (event.type === "payment_intent.succeeded") {
-      const paymentIntent = event.data.object;
-      const userId = paymentIntent.metadata?.userId;
+    const data = await response.json();
+    return data.access_token;
+  } catch (err) {
+    console.error("❌ PayPal Token Error:", err.message);
+    throw err;
+  }
+}
 
-      if (userId) {
+// PayPal Webhook endpoint
+app.post("/api/webhook/paypal", express.json(), async (req, res) => {
+  console.log("📨 PayPal Webhook received:", req.body.event_type);
+  
+  try {
+    const event = req.body;
+    
+    if (event.event_type === "CHECKOUT.ORDER.COMPLETED") {
+      const orderId = event.resource?.id;
+      const status = event.resource?.status;
+      
+      if (orderId && status === "COMPLETED") {
         await order.findOneAndUpdate(
-          { user: userId },
-          { status: "paid" },
+          { paypalOrderId: orderId },
+          { status: "paid", paypalStatus: status },
           { sort: { createdAt: -1 } }
         );
-        console.log("✅ Payment succeeded:", paymentIntent.id);
+        console.log("✅ PayPal order completed:", orderId);
       }
     }
-
-    if (event.type === "payment_intent.payment_failed") {
-      console.log("❌ Payment failed:", event.data.object.id);
-    }
-
+    
     res.json({ received: true });
   } catch (err) {
     console.error("Webhook Error:", err.message);
-    res.status(400).json({ error: "Webhook signature verification failed" });
+    res.status(200).json({ received: true });
   }
 });
 
@@ -408,62 +424,29 @@ app.get("/api/my-books", auth, async (req, res) => {
   }
 });
 
-// POST create payment intent for Stripe
-app.post("/api/create-payment-intent", auth, async (req, res) => {
+// POST create PayPal order
+app.post("/api/create-paypal-order", auth, async (req, res) => {
   try {
-    const { books } = req.body; // books = [{bookId, quantity}, ...]
+    const { books } = req.body;
 
-    console.log("🔍 Payment Intent Request:", {
+    console.log("🔍 PayPal Order Request:", {
       userId: req.user?.userId,
       booksReceived: books,
-      bodyKeys: Object.keys(req.body)
     });
 
     // Validation
-    if (!books) {
+    if (!books || !Array.isArray(books) || books.length === 0) {
       return res.status(400).json({ 
         success: false,
-        message: "Books field is required in request body",
-        received: Object.keys(req.body)
+        message: "Books field is required and must be a non-empty array",
       });
-    }
-
-    if (!Array.isArray(books)) {
-      return res.status(400).json({ 
-        success: false,
-        message: "Books must be an array",
-        received: typeof books
-      });
-    }
-
-    if (books.length === 0) {
-      return res.status(400).json({ 
-        success: false,
-        message: "Books array cannot be empty" 
-      });
-    }
-
-    // Validate each book item
-    for (let i = 0; i < books.length; i++) {
-      const item = books[i];
-      if (!item.bookId || !item.quantity) {
-        return res.status(400).json({
-          success: false,
-          message: `Book at index ${i} missing required fields (bookId, quantity)`,
-          received: item
-        });
-      }
-      if (item.quantity < 1) {
-        return res.status(400).json({
-          success: false,
-          message: `Book at index ${i} has invalid quantity: ${item.quantity}`
-        });
-      }
     }
 
     let totalPrice = 0;
     const bookIds = [];
+    const items = [];
 
+    // Calculate price and get book details
     for (const item of books) {
       const bookOne = await book.findById(item.bookId);
       if (!bookOne) {
@@ -473,54 +456,79 @@ app.post("/api/create-payment-intent", auth, async (req, res) => {
         });
       }
       
-      // Validate price - handle string prices
       const price = parseFloat(bookOne.price);
-      console.log(`📚 Book: ${bookOne.title}, Price: ${price} (Type: ${typeof bookOne.price}), Qty: ${item.quantity}`);
-      
       if (isNaN(price) || price <= 0) {
         return res.status(400).json({
           success: false,
-          message: `Book "${bookOne.title}" has invalid price: ${bookOne.price}. Price must be a positive number.`
+          message: `Book "${bookOne.title}" has invalid price`,
         });
       }
 
       totalPrice += price * item.quantity;
       bookIds.push({ book: item.bookId, quantity: item.quantity });
+      items.push({
+        name: bookOne.title,
+        unit_amount: {
+          currency_code: "USD",
+          value: price.toFixed(2)
+        },
+        quantity: item.quantity.toString()
+      });
     }
 
     if (totalPrice <= 0) {
       return res.status(400).json({
         success: false,
         message: "Total price must be greater than 0",
-        totalPrice
       });
     }
 
-    const amountInCents = Math.round(totalPrice * 100);
-    console.log("✅ Creating Stripe payment intent:", { 
-      totalPrice, 
-      amountInCents,
-      itemCount: books.length,
-      bookCount: bookIds.length
-    });
+    console.log("💳 Creating PayPal order for $" + totalPrice.toFixed(2));
 
-    // Create payment intent with Stripe
-    const paymentIntent = await stripe.paymentIntents.create({
-      amount: amountInCents,
-      currency: "usd",
-      metadata: {
-        userId: req.user.userId,
-        books: JSON.stringify(books),
+    // Get PayPal access token
+    const accessToken = await getPayPalAccessToken();
+
+    // Create PayPal order
+    const paypalResponse = await fetch(`${PAYPAL_API_BASE}/v2/checkout/orders`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${accessToken}`
       },
+      body: JSON.stringify({
+        intent: "CAPTURE",
+        purchase_units: [
+          {
+            amount: {
+              currency_code: "USD",
+              value: totalPrice.toFixed(2),
+              breakdown: {
+                item_total: {
+                  currency_code: "USD",
+                  value: totalPrice.toFixed(2)
+                }
+              }
+            },
+            items: items
+          }
+        ]
+      })
     });
 
-    console.log("✅ Stripe payment intent created:", paymentIntent.id);
+    const paypalOrder = await paypalResponse.json();
+
+    if (!paypalResponse.ok) {
+      throw new Error(paypalOrder.message || "Failed to create PayPal order");
+    }
+
+    console.log("✅ PayPal order created:", paypalOrder.id);
 
     // Create order in database
     const newOrder = new order({
       user: req.user.userId,
       books: bookIds,
       totalPrice,
+      paypalOrderId: paypalOrder.id,
       status: "pending",
     });
 
@@ -530,17 +538,71 @@ app.post("/api/create-payment-intent", auth, async (req, res) => {
 
     res.json({
       success: true,
-      clientSecret: paymentIntent.client_secret,
+      paypalOrderId: paypalOrder.id,
       orderId: newOrder._id,
       totalPrice,
       bookCount: books.length
     });
   } catch (err) {
-    console.error("❌ Payment Intent Error:", err.message);
-    console.error("Stack:", err.stack);
+    console.error("❌ PayPal Order Error:", err.message);
     res.status(500).json({
       success: false,
-      message: "Server error creating payment intent",
+      message: "Server error creating PayPal order",
+      error: process.env.NODE_ENV === 'development' ? err.message : undefined
+    });
+  }
+});
+
+// POST capture PayPal order
+app.post("/api/capture-paypal-order", auth, async (req, res) => {
+  try {
+    const { paypalOrderId } = req.body;
+
+    if (!paypalOrderId) {
+      return res.status(400).json({
+        success: false,
+        message: "paypalOrderId is required"
+      });
+    }
+
+    console.log("📸 Capturing PayPal order:", paypalOrderId);
+
+    const accessToken = await getPayPalAccessToken();
+
+    // Capture payment
+    const captureResponse = await fetch(`${PAYPAL_API_BASE}/v2/checkout/orders/${paypalOrderId}/capture`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${accessToken}`
+      }
+    });
+
+    const captureData = await captureResponse.json();
+
+    if (!captureResponse.ok) {
+      throw new Error(captureData.message || "Failed to capture payment");
+    }
+
+    console.log("✅ Payment captured:", captureData.id);
+
+    // Update order status
+    await order.findOneAndUpdate(
+      { paypalOrderId },
+      { status: "paid", paypalStatus: captureData.status },
+      { new: true }
+    );
+
+    res.json({
+      success: true,
+      paypalOrderId: captureData.id,
+      status: captureData.status
+    });
+  } catch (err) {
+    console.error("❌ Capture Error:", err.message);
+    res.status(500).json({
+      success: false,
+      message: "Server error capturing payment",
       error: process.env.NODE_ENV === 'development' ? err.message : undefined
     });
   }

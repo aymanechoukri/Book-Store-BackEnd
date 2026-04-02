@@ -31,6 +31,16 @@ const orderSheme = new mongoose.Schema(
       enum: ["pending", "paid", "shipped", "completed"],
       default: "pending",
     },
+    // PayPal specific fields
+    paypalOrderId: {
+      type: String,
+      sparse: true,
+    },
+    paypalStatus: {
+      type: String,
+      enum: ["CREATED", "SAVED", "APPROVED", "VOIDED", "COMPLETED"],
+      sparse: true,
+    },
   },
   { timestamps: true },
 );
