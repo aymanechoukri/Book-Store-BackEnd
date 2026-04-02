@@ -217,6 +217,75 @@ app.get("/api/protected", auth, (req, res) => {
   });
 });
 
+// 🧪 TEST ENDPOINT - للتشخيص
+app.post("/api/test-payment", auth, (req, res) => {
+  try {
+    console.log("\n=== PAYMENT TEST ===");
+    console.log("1️⃣ User authenticated:", req.user);
+    console.log("2️⃣ Request body received:", req.body);
+    console.log("3️⃣ Books in request:", req.body.books);
+    
+    const { books } = req.body;
+
+    if (!books) {
+      return res.status(400).json({
+        success: false,
+        message: "❌ books field missing",
+        hint: "Send: { books: [{bookId: 'xxx', quantity: 1}] }",
+        receivedFields: Object.keys(req.body),
+        authStatus: "✅ Authenticated"
+      });
+    }
+
+    if (!Array.isArray(books)) {
+      return res.status(400).json({
+        success: false,
+        message: "❌ books is not an array",
+        received: typeof books,
+        authStatus: "✅ Authenticated"
+      });
+    }
+
+    if (books.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "❌ books array is empty",
+        authStatus: "✅ Authenticated"
+      });
+    }
+
+    // Check each book
+    const validation = books.map((item, idx) => ({
+      index: idx,
+      hasBookId: !!item.bookId,
+      hasQuantity: !!item.quantity,
+      bookId: item.bookId,
+      quantity: item.quantity,
+      valid: !!item.bookId && !!item.quantity && item.quantity > 0
+    }));
+
+    const allValid = validation.every(v => v.valid);
+
+    res.json({
+      success: allValid,
+      message: allValid ? "✅ All checks passed!" : "❌ Some checks failed",
+      authStatus: "✅ Authenticated",
+      user: req.user,
+      bookCount: books.length,
+      validation,
+      nextStep: allValid ? "Ready to create payment intent" : "Fix validation errors above"
+    });
+
+  } catch (err) {
+    console.error("Test error:", err.message);
+    res.status(500).json({
+      success: false,
+      message: "Error in test endpoint",
+      error: err.message
+    });
+  }
+});
+
 // Get all books
 app.get("/api/books", async (req, res) => {
   try {
@@ -344,8 +413,52 @@ app.post("/api/create-payment-intent", auth, async (req, res) => {
   try {
     const { books } = req.body; // books = [{bookId, quantity}, ...]
 
-    if (!books || books.length === 0) {
-      return res.status(400).json({ message: "No books provided" });
+    console.log("🔍 Payment Intent Request:", {
+      userId: req.user?.userId,
+      booksReceived: books,
+      bodyKeys: Object.keys(req.body)
+    });
+
+    // Validation
+    if (!books) {
+      return res.status(400).json({ 
+        success: false,
+        message: "Books field is required in request body",
+        received: Object.keys(req.body)
+      });
+    }
+
+    if (!Array.isArray(books)) {
+      return res.status(400).json({ 
+        success: false,
+        message: "Books must be an array",
+        received: typeof books
+      });
+    }
+
+    if (books.length === 0) {
+      return res.status(400).json({ 
+        success: false,
+        message: "Books array cannot be empty" 
+      });
+    }
+
+    // Validate each book item
+    for (let i = 0; i < books.length; i++) {
+      const item = books[i];
+      if (!item.bookId || !item.quantity) {
+        return res.status(400).json({
+          success: false,
+          message: `Book at index ${i} missing required fields (bookId, quantity)`,
+          received: item
+        });
+      }
+      if (item.quantity < 1) {
+        return res.status(400).json({
+          success: false,
+          message: `Book at index ${i} has invalid quantity: ${item.quantity}`
+        });
+      }
     }
 
     let totalPrice = 0;
@@ -354,21 +467,54 @@ app.post("/api/create-payment-intent", auth, async (req, res) => {
     for (const item of books) {
       const bookOne = await book.findById(item.bookId);
       if (!bookOne) {
-        return res.status(404).json({ message: `Book ${item.bookId} not found` });
+        return res.status(404).json({ 
+          success: false,
+          message: `Book ${item.bookId} not found` 
+        });
       }
-      totalPrice += bookOne.price * item.quantity;
+      
+      // Validate price - handle string prices
+      const price = parseFloat(bookOne.price);
+      console.log(`📚 Book: ${bookOne.title}, Price: ${price} (Type: ${typeof bookOne.price}), Qty: ${item.quantity}`);
+      
+      if (isNaN(price) || price <= 0) {
+        return res.status(400).json({
+          success: false,
+          message: `Book "${bookOne.title}" has invalid price: ${bookOne.price}. Price must be a positive number.`
+        });
+      }
+
+      totalPrice += price * item.quantity;
       bookIds.push({ book: item.bookId, quantity: item.quantity });
     }
 
+    if (totalPrice <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Total price must be greater than 0",
+        totalPrice
+      });
+    }
+
+    const amountInCents = Math.round(totalPrice * 100);
+    console.log("✅ Creating Stripe payment intent:", { 
+      totalPrice, 
+      amountInCents,
+      itemCount: books.length,
+      bookCount: bookIds.length
+    });
+
     // Create payment intent with Stripe
     const paymentIntent = await stripe.paymentIntents.create({
-      amount: Math.round(totalPrice * 100), // Convert to cents
+      amount: amountInCents,
       currency: "usd",
       metadata: {
         userId: req.user.userId,
         books: JSON.stringify(books),
       },
     });
+
+    console.log("✅ Stripe payment intent created:", paymentIntent.id);
 
     // Create order in database
     const newOrder = new order({
@@ -380,16 +526,22 @@ app.post("/api/create-payment-intent", auth, async (req, res) => {
 
     await newOrder.save();
 
+    console.log("✅ Order saved to database:", newOrder._id);
+
     res.json({
       success: true,
       clientSecret: paymentIntent.client_secret,
       orderId: newOrder._id,
+      totalPrice,
+      bookCount: books.length
     });
   } catch (err) {
-    console.error("Payment Intent Error:", err.message);
+    console.error("❌ Payment Intent Error:", err.message);
+    console.error("Stack:", err.stack);
     res.status(500).json({
       success: false,
-      message: "Server error",
+      message: "Server error creating payment intent",
+      error: process.env.NODE_ENV === 'development' ? err.message : undefined
     });
   }
 });
